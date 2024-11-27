@@ -14,9 +14,15 @@
 enum { THREADLIMIT = 30000 };
 
 namespace fs = std::filesystem;
+using st = std::vector<std::string>::size_type;
 
 /* a structure for chopping up a tsv row */
 struct TSVrow {
+    private:
+	std::vector<std::string> data;
+	st cols = 0;
+
+    public:
     TSVrow() = default;
     TSVrow(const std::string s) { parse(s); }
 
@@ -34,21 +40,18 @@ struct TSVrow {
 	return *this;
     }
 
-    std::string operator[](std::vector<std::string>::size_type i) { return data[i]; }
-    std::string operator[](std::vector<std::string>::size_type i) const { return data[i]; }
-    std::vector<std::string>::size_type size() { return cols; }
-    [[nodiscard]] std::vector<std::string>::size_type size() const { return cols; }
+    std::string operator[](st i) { return data[i]; }
+    std::string operator[](st i) const { return data[i]; }
+
+    st size() { return cols; }
+    [[nodiscard]] st size() const { return cols; }
 
     std::vector<std::string>::iterator begin() { return data.begin(); }
     std::vector<std::string>::iterator end() { return data.end(); }
-
-    private:
-	std::vector<std::string> data;
-	std::vector<std::string>::size_type cols = 0;
 };
 
 std::ostream& operator<<(std::ostream& os, TSVrow& row) {
-    for (std::vector<std::string>::size_type i = 0; i < row.size()-1; i++) { os << row[i] << '\t'; }
+    for (st i = 0; i < row.size()-1; i++) { os << row[i] << '\t'; }
     os << row[row.size()-1] << '\n';
     return os;
 }
@@ -60,7 +63,7 @@ class Dset {
     std::ifstream *filePtr = nullptr;
     std::string filename;
 
-public:
+    public:
 
     Dset() = default;;
     Dset(const char *s): filename(s) {  };
