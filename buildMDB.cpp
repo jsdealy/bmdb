@@ -1,4 +1,5 @@
 #include <cmath>
+#include <string>
 #include <utility>
 #include <vector>
 #include <map>
@@ -10,97 +11,27 @@
 #include <stdexcept>
 #include <cstdlib>
 #include <thread>
+#include "jtb/jtbstr.h"
+#include "jtb/jtbvec.h"
 
 enum { THREADLIMIT = 30000 };
 
 namespace fs = std::filesystem;
 using st = std::vector<std::string>::size_type;
 
-/* a structure for chopping up a tsv row */
-struct TSVrow {
-    private:
-	std::vector<std::string> data;
-	st cols = 0;
-
-    public:
-    TSVrow() = default;
-    TSVrow(const std::string s) { parse(s); }
-
-    TSVrow& parse(std::string s) {
-	data.clear();
-
-	std::istringstream ss(s); 
-	std::stringstream chunk;
-	char c = 0;
-	do {
-	    ss.get(c);
-	    if (c != '\t' && ss) { chunk << c; }
-	    else { data.push_back(chunk.str()); chunk.str(""); cols++; }
-	} while (ss);
-	return *this;
-    }
-
-    std::string operator[](st i) { return data[i]; }
-    std::string operator[](st i) const { return data[i]; }
-
-    st size() { return cols; }
-    [[nodiscard]] st size() const { return cols; }
-
-    std::vector<std::string>::iterator begin() { return data.begin(); }
-    std::vector<std::string>::iterator end() { return data.end(); }
-};
-
-std::ostream& operator<<(std::ostream& os, TSVrow& row) {
-    for (st i = 0; i < row.size()-1; i++) { os << row[i] << '\t'; }
-    os << row[row.size()-1] << '\n';
-    return os;
-}
-
-/* a structure for managing a dataset filestream */
-class Dset {
-
-    bool fnd = false;
-    std::ifstream *filePtr = nullptr;
-    std::string filename;
-
-    public:
-
-    Dset() = default;;
-    Dset(const char *s): filename(s) {  };
-
-    ~Dset() { delete filePtr; }
-
-    bool setFoundToTrue() { fnd = true; return fnd; }
-    bool getOpened() { return fnd; }
-
-    void open(std::string s) { 
-	filePtr = new std::ifstream(s); 
-	if (!filePtr) throw std::runtime_error("Out of memory."); 
-	setFoundToTrue(); 
-    }
-
-    [[nodiscard]] std::string getFilename() const {
-	return filename;
-    }
-
-    bool getline(std::string& s) { std::getline(*filePtr, s); return (*filePtr).good(); }
-    operator bool() const { return (*filePtr).good(); }
-    std::string getline() { std::string s; std::getline(*filePtr, s); return s; }
-};
-
 struct Film {
-    std::string tconst = "N\\a";
-    std::string title = "N\\a";
-    std::string origtitle = "N\\a";
-    std::string year = "N\\a";
-    std::string length = "N\\a";
-    std::string genre = "N\\a";
-    std::string rating = "0";
-    std::string numrates = "0";
-    std::string lang = "N\\a";
-    std::string directors = "";
-    std::string writers = "";
-    std::string actors = "";
+    JTB::Str tconst = "N\\a";
+    JTB::Str title = "N\\a";
+    JTB::Str origtitle = "N\\a";
+    JTB::Str year = "N\\a";
+    JTB::Str length = "N\\a";
+    JTB::Str genre = "N\\a";
+    JTB::Str rating = "0";
+    JTB::Str numrates = "0";
+    JTB::Str lang = "N\\a";
+    JTB::Str directors = "";
+    JTB::Str writers = "";
+    JTB::Str actors = "";
 };
 
 struct Ratepair {
@@ -110,10 +41,10 @@ struct Ratepair {
 
 const int nofdsets = 5;
 
-void loadBasics(std::map<std::string, Film>& fdb, Dset& dset) {
-    TSVrow rowslicer;
+void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& file) {
     /* throwing out the first line */
-    dset.getline();
+    JTB::Str buf {};
+    
     /* buffer variables */
     std::string linebuffer;
     enum Cols { TCONST, TYPE, PRIMARY, ORIGINAL, ISADULT, STARTYEAR, ENDYEAR, RUNTIME, GENRES };
