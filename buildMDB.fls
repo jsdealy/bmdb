@@ -1,5 +1,0 @@
-PWD /home/justin/prog/bmdb
-INPUT /usr/share/texmf-dist/web2c/texmf.cnf
-INPUT /home/justin/.texlive/texmf-var/web2c/pdftex/pdflatex.fmt
-INPUT /home/justin/prog/bmdb/buildMDB.cpp
-OUTPUT buildMDB.log
