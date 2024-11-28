@@ -41,21 +41,22 @@ struct Ratepair {
 
 const int nofdsets = 5;
 
-void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& file) {
+void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestream) {
     /* throwing out the first line */
     JTB::Str buf {};
+    buf.absorbLine(filestream).clear();
     
     /* buffer variables */
-    std::string linebuffer;
     enum Cols { TCONST, TYPE, PRIMARY, ORIGINAL, ISADULT, STARTYEAR, ENDYEAR, RUNTIME, GENRES };
 
     /* processing the data */
-    std::vector<std::thread> threadPack;
-    std::mutex mutex;
+    std::vector<std::thread> threadPack {};
+    std::mutex mutex {};
     int count = 0;
 
-    while (dset.getline(linebuffer)) {
-        rowslicer.parse(linebuffer);
+    while (filestream.good()) {
+	buf.clear().absorbLine(filestream);
+	JTB::Vec<JTB::Str> rowslicer = buf.split("\t");
 	if (rowslicer[TYPE] == "movie" 
 	    && rowslicer[ISADULT] == "0"
 	    && rowslicer[STARTYEAR] != R"(\N)" 
@@ -63,14 +64,14 @@ void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& file) {
 
 	    threadPack.emplace_back([&, rowslicer]() {
 		Film film; 
-		film.tconst = rowslicer[TCONST];
-		film.title = rowslicer[PRIMARY];
-		film.origtitle = rowslicer[ORIGINAL];
-		film.year = rowslicer[STARTYEAR];
-		film.length = rowslicer[RUNTIME];
-		film.genre = rowslicer[GENRES];
+		film.tconst = rowslicer.at(TCONST);
+		film.title = rowslicer.at(PRIMARY);
+		film.origtitle = rowslicer.at(ORIGINAL);
+		film.year = rowslicer.at(STARTYEAR);
+		film.length = rowslicer.at(RUNTIME);
+		film.genre = rowslicer.at(GENRES);
 		std::lock_guard<std::mutex> lock(mutex);
-		fdb[film.tconst] = film;
+		film_hashmap[film.tconst] = film;
 	    });
 	    if ((++count)%THREADLIMIT == 0) {
 		for (auto& thread : threadPack) {
@@ -86,20 +87,24 @@ void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& file) {
     std::cout << "Done reading the basics!" << '\n';
 }
 
-void loadRatings(std::map<std::string, Film>& fdb, Dset& dset) {
+void loadRatings(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestream) {
     /* buffers */
-    TSVrow rowslicer;
+    JTB::Vec<JTB::Str> rowslicer {};
+    JTB::Str buf {};
+
     /* throwing out first line */
-    dset.getline();
+    buf.absorbLine(filestream).clear();
+    enum Cols { TCONST, RATING, NUMRATES };
 
     /* reading ratings into fdb */
-    std::string s;
-    while (dset.getline(s)) {
-        rowslicer.parse(s);
+    while (filestream.good()) {
+        rowslicer = buf.clear().absorbLine(filestream).split("\t");
 	try {
-	    fdb.at(rowslicer[0]).rating = rowslicer[1];
-	    fdb.at(rowslicer[0]).numrates = rowslicer[2];
-	} catch (std::exception e) { }
+	    film_hashmap[rowslicer[TCONST]].rating = rowslicer[RATING];
+	    film_hashmap[rowslicer[TCONST]].numrates = rowslicer[NUMRATES];
+	} catch (std::exception e) { 
+	    std::cerr << "Error: " << e.what() << '\n';
+	}
     }
 
     /* erasing films with no rating */
@@ -113,16 +118,21 @@ void loadRatings(std::map<std::string, Film>& fdb, Dset& dset) {
     std::cout << "Done reading ratings!" << '\n';
 }
 
-void loadLanguage(std::map<std::string, Film>& fdb, Dset& dset) {
+void loadLanguage(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestream) {
     /* buffers */
-    TSVrow row;
-    std::string s;
+    JTB::Vec<JTB::Str> rowslicer {};
+    JTB::Str buf {};
+
+    enum Cols { TCONST, LANG };
+
     /* reading langs into buffer */
-    while (dset.getline(s)) {
-        row.parse(s);
+    while (filestream.good()) {
+        rowslicer = buf.clear().absorbLine(filestream).split("\t");
 	try { 
-	    fdb.at(row[0]).lang = row[1];
-	} catch (std::exception e) {  }
+	    film_hashmap[rowslicer[TCONST]].lang = rowslicer[LANG];
+	} catch (std::exception e) { 
+	    std::cerr << "Error: " << e.what() << '\n';
+	}
     }
 
     /* std::string lang; */
@@ -146,7 +156,7 @@ void loadLanguage(std::map<std::string, Film>& fdb, Dset& dset) {
 const int MAXBUF = 100000;
 
 
-void loadPrincipals(std::map<std::string, Film>& fdb, Dset& principals, Dset& names) {
+void loadPrincipals(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& principals, std::ifstream& names) {
     /* buffers */
     TSVrow row;
     std::string s;
