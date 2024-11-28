@@ -39,6 +39,11 @@ struct Ratepair {
     std::string numrates;
 };
 
+template <typename T>
+int icast(T thing) {
+    return static_cast<int>(thing);
+}
+
 const int nofdsets = 5;
 
 void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestream) {
@@ -54,31 +59,37 @@ void loadBasics(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestrea
     std::mutex mutex {};
     int count = 0;
 
-    while (filestream.good()) {
-	buf.clear().absorbLine(filestream);
+    while ( filestream.good() && !buf.clear().absorbLine(filestream).isEmpty() ) {
 	JTB::Vec<JTB::Str> rowslicer = buf.split("\t");
-	if (rowslicer[TYPE] == "movie" 
-	    && rowslicer[ISADULT] == "0"
-	    && rowslicer[STARTYEAR] != R"(\N)" 
-	    && rowslicer[RUNTIME] != R"(\N)") {
+	try {
+	    if (rowslicer[TYPE] == "movie" 
+		&& rowslicer[ISADULT] == "0"
+		&& rowslicer[STARTYEAR] != R"(\N)" 
+		&& rowslicer[RUNTIME] != R"(\N)") {
 
-	    threadPack.emplace_back([&, rowslicer]() {
-		Film film; 
-		film.tconst = rowslicer.at(TCONST);
-		film.title = rowslicer.at(PRIMARY);
-		film.origtitle = rowslicer.at(ORIGINAL);
-		film.year = rowslicer.at(STARTYEAR);
-		film.length = rowslicer.at(RUNTIME);
-		film.genre = rowslicer.at(GENRES);
-		std::lock_guard<std::mutex> lock(mutex);
-		film_hashmap[film.tconst] = film;
-	    });
-	    if ((++count)%THREADLIMIT == 0) {
-		for (auto& thread : threadPack) {
-		    thread.join();
+		threadPack.emplace_back([&, rowslicer]() {
+		    Film film; 
+		    film.tconst = rowslicer.at(TCONST);
+		    film.title = rowslicer.at(PRIMARY);
+		    film.origtitle = rowslicer.at(ORIGINAL);
+		    film.year = rowslicer.at(STARTYEAR);
+		    film.length = rowslicer.at(RUNTIME);
+		    film.genre = rowslicer.at(GENRES);
+		    std::lock_guard<std::mutex> lock(mutex);
+		    film_hashmap[film.tconst] = film;
+		});
+		if ((++count)%THREADLIMIT == 0) {
+		    for (auto& thread : threadPack) {
+			thread.join();
+		    }
+		    threadPack.clear();
 		}
-		threadPack.clear();
 	    }
+	} catch (std::exception e) {
+	    std::cerr << "Error reading basics: " << e.what() << '\n';
+	    std::cerr << "Count: " << count << '\n';
+	    std::cerr << "Rowslicer: " << rowslicer << '\n';
+	    exit(1);
 	}
     }
     for (auto& thread : threadPack) {
@@ -97,23 +108,19 @@ void loadRatings(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestre
     enum Cols { TCONST, RATING, NUMRATES };
 
     /* reading ratings into fdb */
-    while (filestream.good()) {
-        rowslicer = buf.clear().absorbLine(filestream).split("\t");
+    while ( filestream.good() && !buf.clear().absorbLine(filestream).isEmpty() ) {
+        rowslicer = buf.split("\t");
 	try {
-	    film_hashmap[rowslicer[TCONST]].rating = rowslicer[RATING];
-	    film_hashmap[rowslicer[TCONST]].numrates = rowslicer[NUMRATES];
+	    if (film_hashmap.contains(rowslicer[TCONST])) {
+		film_hashmap[rowslicer[TCONST]].rating = rowslicer[RATING];
+		film_hashmap[rowslicer[TCONST]].numrates = rowslicer[NUMRATES];
+	    }
 	} catch (std::exception e) { 
+	    std::cerr << "Problem inserting ratings" << '\n';
 	    std::cerr << "Error: " << e.what() << '\n';
+	    exit(1);
 	}
     }
-
-    /* erasing films with no rating */
-    /* for (auto it = fdb.begin(); it != fdb.end();) { */
-    /*     if (it->second.rating == "0" || it->second.numrates == "0") */
-    /*         it = fdb.erase(it); */
-	/* else */ 
-	    /* it++; */
-    /* } */
 
     std::cout << "Done reading ratings!" << '\n';
 }
@@ -126,31 +133,24 @@ void loadLanguage(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestr
     enum Cols { TCONST, LANG };
 
     /* reading langs into buffer */
-    while (filestream.good()) {
-        rowslicer = buf.clear().absorbLine(filestream).split("\t");
+    int count = 0;
+    while ( filestream.good() && !buf.clear().absorbLine(filestream).isEmpty() ) {
+        rowslicer = buf.split("\t");
+	if (rowslicer.size() < 2) continue; 
 	try { 
-	    film_hashmap[rowslicer[TCONST]].lang = rowslicer[LANG];
-	} catch (std::exception e) { 
+	    if (film_hashmap.contains(rowslicer[TCONST])) {
+		film_hashmap.at(rowslicer[TCONST]).lang = rowslicer[LANG];
+	    }
+	} catch (std::out_of_range e) { 
+	    std::cerr << "Problem inserting languages" << '\n';
 	    std::cerr << "Error: " << e.what() << '\n';
+	    std::cerr << "Rowslicer: " << rowslicer << '\n';
+	    exit(1);
 	}
     }
 
-    /* std::string lang; */
-    /* buffer for langs */
-    /* std::map<std::string, std::string> langs; */
-
-
-    /* /1* transferring langs to fdb *1/ */
-    /* for (auto& [k, film] : fdb) { */
-	/* try { */
-	    /* film.lang = langs[film.tconst]; */
-	/* } catch (std::exception e) {  } */
-	/* /1* lang = langs[film.tconst]; *1/ */
-    /*     /1* if (!lang.empty()) { *1/ */
-    /*         /1* film.lang = lang; *1/ */
-    /*     /1* } *1/ */
-    /* } */
     std::cout << "Done reading languages!" << '\n';
+
 };
 
 const int MAXBUF = 100000;
@@ -164,34 +164,35 @@ void loadPrincipals(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& princ
     /* buffer for names */
     std::map<JTB::Str, JTB::Str> namebuf {};
 
+    enum class Names { NCONST, NAME };
+    enum class Principles { TCONST, ORDERING, NCONST, CATEGORY, JOB, CHARACTERS };
+    
+
     /* reading names into buffer */
-    while (names_stream.good()) {
-        rowslicer = buf.clear().absorbLine(names_stream).split("\n");
-	namebuf[rowslicer[0]] = rowslicer[1];
+    while (names_stream.good() && !buf.clear().absorbLine(names_stream).isEmpty()) {
+        rowslicer = buf.split("\t");
+	if (rowslicer.size() < 2) continue;
+	namebuf[rowslicer[static_cast<int>(Names::NCONST)]] = rowslicer[static_cast<int>(Names::NAME)];
     }
     std::cout << "Done reading names!" << '\n';
 
-
     /* filling in principals */
-    rowslicer = buf.clear().absorbLine(principals_stream).split("\n");
-    bool NOT_IN = false;
-    while (principals_stream.good()) {
-	rowslicer = buf.clear().absorbLine(principals_stream).split("\n");
-	if (NOT_IN && rowslicer.at(1) != "1") continue;
-	try {
-	    film_hashmap.at(rowslicer[0]);
-	    NOT_IN = false;
-	    if (rowslicer[3].at(0) == 'a') {
-		film_hashmap[rowslicer[0]].actors = film_hashmap[rowslicer[0]].actors + namebuf[rowslicer[2]].push(',');
-	    }
-	    else if (rowslicer[3].at(0) == 'd') {
-		film_hashmap[rowslicer[0]].directors = film_hashmap[rowslicer[0]].directors + namebuf[rowslicer[2]].push(',');
-	    }
-	    else if (rowslicer[3].at(0) == 'w') {
-		film_hashmap[rowslicer[0]].writers = film_hashmap[rowslicer[0]].writers + namebuf[rowslicer[2]].push(',');
-	    }
-	} catch (std::out_of_range e) { 
-	    NOT_IN = true;
+    buf.absorbLine(principals_stream);
+    while (principals_stream.good() && !buf.clear().absorbLine(principals_stream).isEmpty()) {
+	rowslicer = buf.split("\t");
+	if (rowslicer.size() < 4) continue;
+	if (!film_hashmap.contains(rowslicer[icast(Principles::TCONST)])) continue;
+	if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("a")) {
+	    film_hashmap[rowslicer.at(icast(Principles::TCONST))].actors 
+		= film_hashmap[rowslicer.at(icast(Principles::TCONST))].actors + namebuf[rowslicer.at(icast(Principles::NCONST))] + ',';
+	}
+	else if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("d")) {
+	    film_hashmap[rowslicer.at(icast(Principles::TCONST))].directors 
+		= film_hashmap[rowslicer.at(icast(Principles::TCONST))].directors + namebuf[rowslicer.at(icast(Principles::NCONST))] + ',';
+	}
+	else if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("w")) {
+	    film_hashmap[rowslicer.at(icast(Principles::TCONST))].writers 
+		= film_hashmap[rowslicer.at(icast(Principles::TCONST))].writers + namebuf[rowslicer.at(icast(Principles::NCONST))] + ',';
 	}
     }
     std::cout << "Done reading principals!" << '\n';
@@ -228,12 +229,13 @@ int main() {
     std::ifstream principals_stream {};
     std::ifstream name_basics_stream {};
     try { 
-	std::ifstream lang_stream { movieDatabasePath.str() + "lang.tsv" };
-	std::ifstream basics_stream { movieDatabasePath.str() + "title.basics.tsv" }; 
-	std::ifstream ratings_stream { movieDatabasePath.str() + "title.ratings.tsv" }; 
-	std::ifstream principals_stream { movieDatabasePath.str() + "title.principals.tsv" };
-	std::ifstream name_basics_stream { movieDatabasePath.str() + "name.basics.tsv" };
+	lang_stream.open( movieDatabasePath.str() + "/lang.tsv" );
+	basics_stream.open( movieDatabasePath.str() + "/title.basics.tsv" ); 
+	ratings_stream.open( movieDatabasePath.str() + "/title.ratings.tsv" ); 
+	principals_stream.open( movieDatabasePath.str() + "/title.principals.tsv" );
+	name_basics_stream.open( movieDatabasePath.str() + "/name.basics.tsv" );
     } catch (std::exception e) { 
+	std::cerr << "Problem with opening filestreams" << '\n';
 	std::cerr << "Error: " << e.what() << '\n';
 	exit(1);
     }

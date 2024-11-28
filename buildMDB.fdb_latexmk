@@ -1,0 +1,12 @@
+# Fdb version 4
+["pdflatex"] 1732806803.70826 "/home/justin/prog/bmdb/buildMDB.cpp" "buildMDB.pdf" "buildMDB" 1732806803.89296 2
+  "/home/justin/.texlive/texmf-var/web2c/pdftex/pdflatex.fmt" 1711214382 7112993 2c8e8d6790ccbf2ed942482d87d0e544 ""
+  "/home/justin/prog/bmdb/buildMDB.cpp" 1732806602.47328 8726 74c2978fba68a2756973c52b91cdb4a0 ""
+  "/usr/share/texmf-dist/web2c/texmf.cnf" 1727349926 41588 b43d3e860a4f94167ee1e725ff526a72 ""
+  "buildMDB.aux" 1732806382.57582 32 3985256e7290058c681f74d7a3565a19 "pdflatex"
+  "buildMDB.cpp" 1732806602.47328 8726 74c2978fba68a2756973c52b91cdb4a0 ""
+  (generated)
+  "buildMDB.aux"
+  "buildMDB.log"
+  "buildMDB.pdf"
+  (rewritten before read)
