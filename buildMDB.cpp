@@ -156,43 +156,42 @@ void loadLanguage(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestr
 const int MAXBUF = 100000;
 
 
-void loadPrincipals(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& principals, std::ifstream& names) {
+void loadPrincipals(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& principals_stream, std::ifstream& names_stream) {
     /* buffers */
-    TSVrow row;
-    std::string s;
+    JTB::Vec<JTB::Str> rowslicer {};
+    JTB::Str buf {};
 
     /* buffer for names */
-    std::map<std::string, std::string> namebuf;
+    std::map<JTB::Str, JTB::Str> namebuf {};
 
     /* reading names into buffer */
-    while (names.getline(s)) {
-        row.parse(s);
-	namebuf[row[0]] = row[1];
+    while (names_stream.good()) {
+        rowslicer = buf.clear().absorbLine(names_stream).split("\n");
+	namebuf[rowslicer[0]] = rowslicer[1];
     }
     std::cout << "Done reading names!" << '\n';
 
 
     /* filling in principals */
-    principals.getline(s);
-    row.parse(s);
-    bool notin = false;
-    while (principals.getline(s)) {
-	row.parse(s);
-	if (notin && row[1] != "1") continue;
+    rowslicer = buf.clear().absorbLine(principals_stream).split("\n");
+    bool NOT_IN = false;
+    while (principals_stream.good()) {
+	rowslicer = buf.clear().absorbLine(principals_stream).split("\n");
+	if (NOT_IN && rowslicer.at(1) != "1") continue;
 	try {
-	    fdb.at(row[0]);
-	    notin = false;
-	    if (row[3].at(0) == 'a') {
-		fdb[row[0]].actors = fdb[row[0]].actors+namebuf[row[2]]+',';
+	    film_hashmap.at(rowslicer[0]);
+	    NOT_IN = false;
+	    if (rowslicer[3].at(0) == 'a') {
+		film_hashmap[rowslicer[0]].actors = film_hashmap[rowslicer[0]].actors + namebuf[rowslicer[2]].push(',');
 	    }
-	    else if (row[3].at(0) == 'd') {
-		fdb[row[0]].directors = fdb[row[0]].directors+namebuf[row[2]]+',';
+	    else if (rowslicer[3].at(0) == 'd') {
+		film_hashmap[rowslicer[0]].directors = film_hashmap[rowslicer[0]].directors + namebuf[rowslicer[2]].push(',');
 	    }
-	    else if (row[3].at(0) == 'w') {
-		fdb[row[0]].writers = fdb[row[0]].writers+namebuf[row[2]]+',';
+	    else if (rowslicer[3].at(0) == 'w') {
+		film_hashmap[rowslicer[0]].writers = film_hashmap[rowslicer[0]].writers + namebuf[rowslicer[2]].push(',');
 	    }
 	} catch (std::out_of_range e) { 
-	    notin = true;
+	    NOT_IN = true;
 	}
     }
     std::cout << "Done reading principals!" << '\n';
@@ -200,17 +199,8 @@ void loadPrincipals(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& princ
 
 int main() {
 
-    std::map<std::string, Dset> dataSetMap { 
-	    { "lang", "lang.tsv" }, 
-	    { "basics", "title.basics.tsv" }, 
-	    { "ratings", "title.ratings.tsv" }, 
-	    { "principals", "title.principals.tsv" },
-	    { "name", "name.basics.tsv" } 
-    };
-
     /* reading the directory and opening the relevant files if they're found */
     auto environ = std::getenv("__MOVIE_DATABASE_PATH");
-
     std::stringstream movieDatabasePath { "" }; 
     movieDatabasePath << (environ == nullptr ? "" : environ);
 
@@ -222,7 +212,6 @@ int main() {
     }
 
     environ = std::getenv("MOVIES");
-
     std::stringstream moviesWithPath { "" }; 
     moviesWithPath << (environ == nullptr ? "" : environ);
 
@@ -233,37 +222,33 @@ int main() {
 	std::cout << moviesWithPath.str() << '\n';
     }
 
-    fs::directory_iterator dirIterator { fs::path(movieDatabasePath.str()) };
-
-    for (auto const& directoryEntry : dirIterator) {
-	/* buffer for current filename */
-	std::string fileName(directoryEntry.path().filename());
-
-	/* opening files with names matching dataset filenames */
-	for (auto& [key, ds] : dataSetMap) {
-	    if (ds.getFilename() == fileName) ds.open(directoryEntry.path());
-	} 
+    std::ifstream lang_stream {};
+    std::ifstream basics_stream {}; 
+    std::ifstream ratings_stream {}; 
+    std::ifstream principals_stream {};
+    std::ifstream name_basics_stream {};
+    try { 
+	std::ifstream lang_stream { movieDatabasePath.str() + "lang.tsv" };
+	std::ifstream basics_stream { movieDatabasePath.str() + "title.basics.tsv" }; 
+	std::ifstream ratings_stream { movieDatabasePath.str() + "title.ratings.tsv" }; 
+	std::ifstream principals_stream { movieDatabasePath.str() + "title.principals.tsv" };
+	std::ifstream name_basics_stream { movieDatabasePath.str() + "name.basics.tsv" };
+    } catch (std::exception e) { 
+	std::cerr << "Error: " << e.what() << '\n';
+	exit(1);
     }
 
-    /* checking for whether all the necessary files are present */
-    for (auto& [key, ds] : dataSetMap) {
-        if (!ds.getOpened()) { 
-	    std::string error { "Didn't find all the files. Missing: " };
-	    error.append(ds.getFilename());
-	    throw std::logic_error(error); 
-	    return 1; 
-	}
-    }
+    std::map<JTB::Str, Film> fdata {};
 
-    std::map<std::string, Film> fdata;
+    loadBasics(fdata, basics_stream);
+    loadRatings(fdata, ratings_stream);
+    loadLanguage(fdata, lang_stream);
+    loadPrincipals(fdata, principals_stream, name_basics_stream);
 
-    loadBasics(fdata, dataSetMap["basics"]);
-    loadRatings(fdata, dataSetMap["ratings"]);
-    loadLanguage(fdata, dataSetMap["lang"]);
-    loadPrincipals(fdata, dataSetMap["principals"], dataSetMap["name"]);
+    std::ofstream os { moviesWithPath.str() };
 
-    std::ofstream os(moviesWithPath.str());
     char tab = '\t';
+
     for (auto const& [k, film] : fdata) {
 	if (film.numrates != "0") {
 	    os << film.tconst << tab << film.title << ";" << film.origtitle << tab; 
