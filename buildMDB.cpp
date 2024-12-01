@@ -14,6 +14,7 @@
 #include "jtb/jtbstr.h"
 #include "jtb/jtbvec.h"
 
+
 enum { THREADLIMIT = 30000 };
 
 namespace fs = std::filesystem;
@@ -152,9 +153,6 @@ void loadLanguage(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& filestr
     std::cout << "Done reading languages!" << '\n';
 
 };
-
-const int MAXBUF = 100000;
-
 
 void loadPrincipals(std::map<JTB::Str, Film>& film_hashmap, std::ifstream& principals_stream, std::ifstream& names_stream) {
     /* buffers */
