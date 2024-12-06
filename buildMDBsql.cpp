@@ -14,7 +14,7 @@
 #include "jtb/jtbvec.h"
 #include <SQLiteCpp/SQLiteCpp.h>
 
-const int THREADLIMIT = 1;
+const int THREADLIMIT = 4;
 
 namespace fs = std::filesystem;
 using st = std::vector<std::string>::size_type;
@@ -385,7 +385,6 @@ void doIt (std::mutex& mutex, SQLite::Database& db, SQLite::Statement& statement
 	std::cerr << "Bonked the retry: "<< e.what() << '\n';
 	return;
     }
-    std::cerr << "Retry successful" << '\n';
 }
 
 void loadPrincipals(std::vector<std::unique_ptr<SQLite::Database>>& dbs, JTB::Vec<std::ifstream>& principals_streams, std::ifstream& names_stream) {
@@ -452,6 +451,10 @@ void loadPrincipals(std::vector<std::unique_ptr<SQLite::Database>>& dbs, JTB::Ve
     std::mutex mutex {};
     for (int threadnum = 0; threadnum < std::min(THREADLIMIT,static_cast<int>(principals_data.starts.size())); ++threadnum) {
 	threadPack.emplace_back([&,threadnum](){
+	    SQLite::Statement wal { *(dbs.at(threadnum)), "pragma journal_mode = WAL" };
+	    SQLite::Statement sync { *(dbs.at(threadnum)), "pragma synchronous = normal" };
+	    SQLite::Statement tempstore { *(dbs.at(threadnum)), "pragma temp_store = memory" };
+	    SQLite::Statement mmap { *(dbs.at(threadnum)), "pragma mmap_size = 30000000000" };
 	    SQLite::Statement select1 { *(dbs.at(threadnum)), "SELECT * FROM Films WHERE tconst = ?" };
 	    SQLite::Statement select2 { *(dbs.at(threadnum)), "SELECT * FROM Directors WHERE tconst = ? AND nconst = ?" };
 	    SQLite::Statement select3 { *(dbs.at(threadnum)), "SELECT * FROM Actors WHERE tconst = ? AND nconst = ?" };
