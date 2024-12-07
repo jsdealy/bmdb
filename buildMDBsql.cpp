@@ -15,6 +15,7 @@
 #include <SQLiteCpp/SQLiteCpp.h>
 
 const int THREADLIMIT = 4;
+const int PRINCIPLES_BATCH_SIZE = 5000000;
 
 namespace fs = std::filesystem;
 using st = std::vector<std::string>::size_type;
@@ -124,7 +125,7 @@ public:
     int getChunksize() { return chunksize; }
 };
 
-void loadBasics(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstream& filestream) {
+void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
     /* throwing out the first line */
     JTB::Str buf {};
     buf.absorbLine(filestream).clear();
@@ -152,10 +153,10 @@ void loadBasics(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstre
 
     for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
 	threadPack.push([&,threadnum](){
-	    SQLite::Statement film_insert {*(dbs.at(0)), "INSERT INTO Films (tconst, title, originalTitle) VALUES (?, ?, ?)" };
-	    SQLite::Statement year_insert {*(dbs.at(0)), "INSERT INTO Years (tconst, year) VALUES (?, ?)" };
-	    SQLite::Statement runtime_insert {*(dbs.at(0)), "INSERT INTO Runtimes (tconst, runtimeInMin) VALUES (?, ?)" };
-	    SQLite::Statement genre_insert {*(dbs.at(0)), "INSERT INTO Genres (tconst, genre) VALUES (?, ?)" };
+	    SQLite::Statement film_insert {db, "INSERT INTO Films (tconst, title, originalTitle) VALUES (?, ?, ?)" };
+	    SQLite::Statement year_insert {db, "INSERT INTO Years (tconst, year) VALUES (?, ?)" };
+	    SQLite::Statement runtime_insert {db, "INSERT INTO Runtimes (tconst, runtimeInMin) VALUES (?, ?)" };
+	    SQLite::Statement genre_insert {db, "INSERT INTO Genres (tconst, genre) VALUES (?, ?)" };
 	    int start = chunksize*(threadnum);
 	    int stop = chunksize*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
@@ -171,7 +172,6 @@ void loadBasics(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstre
 		    runtime_insert.reset();
 		    runtime_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
 		    runtime_insert.bind(2, std::stoi((*filebuffer).at(line).at(RUNTIME).c_str()));
-
 		    film_insert.exec();
 		    year_insert.exec();
 		    runtime_insert.exec();
@@ -201,7 +201,7 @@ void loadBasics(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstre
     std::cerr << "Done reading the basics!" << '\n';
 }
 
-void loadRatings(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstream& filestream) {
+void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
     /* buffers */
     JTB::Str buf {};
 
@@ -211,40 +211,22 @@ void loadRatings(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstr
     enum Cols { TCONST, RATING, NUMRATES };
 
     JTB::Vec<std::thread> threadPack {};
-    std::mutex mutex {};
 
     Filebuffer filebuffer { filestream };
     int size = filebuffer.getBuf().size();
 
     for (int threadnum = 0; threadnum < THREADLIMIT; ++threadnum) {
 	threadPack.push([&,threadnum](){
-	    SQLite::Statement select1 { *(dbs.at(threadnum)), "SELECT * FROM Films WHERE tconst = ?" };
-	    SQLite::Statement select2 { *(dbs.at(threadnum)), "SELECT * FROM Ratings WHERE tconst = ?" };
-	    SQLite::Statement insert { *(dbs.at(threadnum)), "INSERT INTO Ratings (tconst, rating, numVotes) VALUES (?, ?, ?)" };
+	    SQLite::Statement insert { db, "INSERT INTO Ratings (tconst, rating, numVotes) VALUES (?, ?, ?)" };
 	    int start = filebuffer.getChunksize()*threadnum;
 	    int stop = filebuffer.getChunksize()*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
 		try {
-		    {
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			select1.reset();
-			select1.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-			select1.executeStep();
-			select2.reset();
-			select2.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-			select2.executeStep();
-			tr.commit();
-		    }
-		    if (select1.hasRow() && !select2.hasRow()) {
-			std::lock_guard<std::mutex> lock {mutex};
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			insert.reset(); 
-			insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-			insert.bind(2,std::stof(filebuffer.getBuf().at(line).at(RATING).c_str()));
-			insert.bind(3,std::stoi(filebuffer.getBuf().at(line).at(NUMRATES).c_str()));
-			insert.exec(); 
-			tr.commit();
-		    }
+		    insert.reset(); 
+		    insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
+		    insert.bind(2,std::stof(filebuffer.getBuf().at(line).at(RATING).c_str()));
+		    insert.bind(3,std::stoi(filebuffer.getBuf().at(line).at(NUMRATES).c_str()));
+		    insert.exec(); 
 		} catch (SQLite::Exception& e) { 
 		    std::cerr << "Problem inserting ratings" << '\n';
 		    std::cerr << "Problem: " << e.what() << '\n';
@@ -266,7 +248,7 @@ void loadRatings(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstr
     std::cerr << "Done reading ratings!" << '\n';
 }
 
-void loadLanguage(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstream& langfilstream) {
+void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
     /* buffers */
 
     enum Cols { TCONST, LANG };
@@ -280,32 +262,14 @@ void loadLanguage(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifst
 	int start = filebuffer.getChunksize()*threadnum;
 	int stop = filebuffer.getChunksize()*(threadnum+1);
 	threadPack.push([&,start,stop](){
-	    SQLite::Statement select1 { *(dbs.at(threadnum)), "SELECT * FROM Films WHERE tconst = ?" };
-	    SQLite::Statement select2 { *(dbs.at(threadnum)), "SELECT * FROM Languages WHERE tconst = ? AND lang = ?" };
-	    SQLite::Statement insert { *(dbs.at(threadnum)), "INSERT INTO Languages (tconst, lang) VALUES (?, ?)" };
+	    SQLite::Statement insert { db, "INSERT INTO Languages (tconst, lang) VALUES (?, ?)" };
 	    for (int line = start; line < std::min(stop,size); ++line) {
 		if (filebuffer.getBuf().at(line).size() < 2) continue; 
 		try { 
-		    {
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			select1.reset();
-			select1.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-			select1.executeStep();
-			select2.reset();
-			select2.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-			select2.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
-			select2.executeStep();
-			tr.commit();
-		    }
-		    if (select1.hasRow() && !select2.hasRow()) {
-			std::lock_guard<std::mutex> lock {mutex};
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-			insert.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
-			insert.exec(); 
-			insert.reset(); 
-			tr.commit();
-		    }
+		    insert.reset(); 
+		    insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
+		    insert.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
+		    insert.exec(); 
 		} catch (SQLite::Exception& e) { 
 		    std::cerr << "Problem inserting languages" << '\n';
 		    std::cerr << "Problem: " << e.what() << '\n';
@@ -324,30 +288,50 @@ void loadLanguage(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifst
 	    }
 	});
     }
-
     std::cerr << "Done reading languages!" << '\n';
 };
 
 
-void doIt (std::mutex& mutex, SQLite::Database& db, SQLite::Statement& statement, JTB::Vec<JTB::Str>& rowslicer, int a, int b){
+void doIt (SQLite::Database& db, SQLite::Statement& statement, JTB::Vec<JTB::Str>& rowslicer, std::initializer_list<int> lst){
     try {
-	std::lock_guard<std::mutex> lock { mutex };
-	SQLite::Transaction tr { db };
 	statement.reset();
-	statement.bind(1, rowslicer.at(a).c_str());
-	statement.bind(2, rowslicer.at(b).c_str());
+	int param = 0;
+	for (const int i : lst) {
+	    statement.bind(++param, rowslicer.at(i).c_str());
+	}
 	statement.exec();
-	tr.commit();
     } catch (SQLite::Exception& e) {
-	std::cerr << "Bonked the retry: "<< e.what() << '\n';
+	std::cerr << "Problemo: "<< e.what() << '\n';
 	return;
+    } catch (std::exception& e) {
+	std::cerr << "Error: " << e.what() << '\n';
+	exit(1);
     }
 }
 
-void loadPrincipals(std::vector<std::unique_ptr<SQLite::Database>>& dbs, JTB::Vec<std::ifstream>& principals_streams, std::ifstream& names_stream) {
+void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std::ifstream& names_stream) {
     /* buffers */
+    /* throwing out the first line */
+    JTB::Str buf {};
+    buf.absorbLine(principals_stream).clear();
     enum class Names { NCONST, NAME };
     enum class Principles { TCONST, ORDERING, NCONST, CATEGORY, JOB, CHARACTERS };
+
+    while (principals_stream.good()) {
+	std::unique_ptr<JTB::Vec<JTB::Vec<JTB::Str>>> filebuffer {new JTB::Vec<JTB::Vec<JTB::Str>>};
+
+	/* processing the data */
+	while ( principals_stream.good() && !buf.clear().absorbLine(principals_stream).isEmpty() ) {
+	    JTB::Vec<JTB::Str> rowslicer = buf.split("\t");
+	    if (rowslicer[TYPE] == "movie" 
+		&& rowslicer[ISADULT] == "0"
+		&& rowslicer[STARTYEAR] != R"(\N)" 
+		&& rowslicer[RUNTIME] != R"(\N)") {
+		(*filebuffer).push(rowslicer);
+	    }
+	}
+
+    }
 
     /* StreamData name_data { getStreamData(names_stream, THREADLIMIT, [](std::ifstream& ifstream,uint i){ */
 	/* JTB::Str buf {}; */
@@ -408,17 +392,9 @@ void loadPrincipals(std::vector<std::unique_ptr<SQLite::Database>>& dbs, JTB::Ve
     std::mutex mutex {};
     for (int threadnum = 0; threadnum < std::min(THREADLIMIT,static_cast<int>(principals_data.starts.size())); ++threadnum) {
 	threadPack.emplace_back([&,threadnum](){
-	    SQLite::Statement wal { *(dbs.at(threadnum)), "pragma journal_mode = WAL" };
-	    SQLite::Statement sync { *(dbs.at(threadnum)), "pragma synchronous = normal" };
-	    SQLite::Statement tempstore { *(dbs.at(threadnum)), "pragma temp_store = memory" };
-	    SQLite::Statement mmap { *(dbs.at(threadnum)), "pragma mmap_size = 30000000000" };
-	    SQLite::Statement select1 { *(dbs.at(threadnum)), "SELECT * FROM Films WHERE tconst = ?" };
-	    SQLite::Statement select2 { *(dbs.at(threadnum)), "SELECT * FROM Directors WHERE tconst = ? AND nconst = ?" };
-	    SQLite::Statement select3 { *(dbs.at(threadnum)), "SELECT * FROM Actors WHERE tconst = ? AND nconst = ?" };
-	    SQLite::Statement select4 { *(dbs.at(threadnum)), "SELECT * FROM Writers WHERE tconst = ? AND nconst = ?" };
-	    SQLite::Statement directors_insert { *(dbs.at(threadnum)), "INSERT INTO Directors (tconst, nconst) VALUES (?, ?)" };
-	    SQLite::Statement actors_insert { *(dbs.at(threadnum)), "INSERT INTO Actors (tconst, nconst) VALUES (?, ?)" };
-	    SQLite::Statement writers_insert { *(dbs.at(threadnum)), "INSERT INTO Writers (tconst, nconst) VALUES (?, ?)" };
+	    SQLite::Statement directors_insert { db, "INSERT INTO Directors (tconst, nconst) VALUES (?, ?)" };
+	    SQLite::Statement actors_insert { db, "INSERT INTO Actors (tconst, nconst) VALUES (?, ?)" };
+	    SQLite::Statement writers_insert { db, "INSERT INTO Writers (tconst, nconst) VALUES (?, ?)" };
 	    uint seek {};
 	    uint stop {};
 	    try {
@@ -428,8 +404,6 @@ void loadPrincipals(std::vector<std::unique_ptr<SQLite::Database>>& dbs, JTB::Ve
 		std::cerr << "starts and stops read error: " << e.what() << '\n';
 		exit(1);
 	    }
-	    if (principals_streams.at(threadnum).good()) { principals_streams.at(threadnum).seekg(seek); } 
-	    else { std::cerr << "Principals stream number " << threadnum << " is not good.\n"; exit(1); }
 	    JTB::Str buf {};
 	    JTB::Vec<JTB::Str> rowslicer {};
 	    uint problemcount {0};
@@ -443,71 +417,29 @@ void loadPrincipals(std::vector<std::unique_ptr<SQLite::Database>>& dbs, JTB::Ve
 	    for (; principals_streams.at(threadnum).good() && seek < stop; ++seek) {
 		rowslicer = buf.clear().absorbLine(principals_streams.at(threadnum)).split('\t');
 		if (rowslicer.size() < 6) continue;
-		bool abool = true;
-		bool dbool = true;
-		bool wbool = true;
 		try {
-		    {
-			std::lock_guard<std::mutex> lock { mutex };
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			select1.reset();
-			select1.bind(1, rowslicer.at(icast(Principles::TCONST)).c_str());
-			select1.executeStep();
-			select2.reset();
-			select2.bind(1, rowslicer.at(icast(Principles::TCONST)).c_str());
-			select2.bind(2, rowslicer.at(icast(Principles::NCONST)).c_str());
-			select2.executeStep();
-			dbool = select2.hasRow();
-			select3.reset();
-			select3.bind(1, rowslicer.at(icast(Principles::TCONST)).c_str());
-			select3.bind(2, rowslicer.at(icast(Principles::NCONST)).c_str());
-			select3.executeStep();
-			abool = select3.hasRow();
-			select4.reset();
-			select4.bind(1, rowslicer.at(icast(Principles::TCONST)).c_str());
-			select4.bind(2, rowslicer.at(icast(Principles::NCONST)).c_str());
-			select4.executeStep();
-			wbool = select4.hasRow();
-			tr.commit();
-		    }
-		    if (!select1.hasRow()) continue;
 		    /* actors <== 11/29/24 15:39:28 */ 
-		    if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("a") && !abool) {
+		    if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("a")) {
 			try {
-			    doIt(mutex,*(dbs.at(threadnum)),actors_insert,rowslicer,icast(Principles::TCONST),icast(Principles::NCONST));
+			    doIt(db,actors_insert,rowslicer,{icast(Principles::TCONST),icast(Principles::NCONST)});
 			} catch (SQLite::Exception& e) {
 			    std::cerr << "actor error: " << e.what() << '\n';
-			    JTB::Str error {e.what()};
-			    if (error.includes("lock")) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(300*(threadnum+1)));
-				doIt(mutex,*(dbs.at(threadnum)),actors_insert,rowslicer,icast(Principles::TCONST),icast(Principles::NCONST));
-			    }
 			}
 		    }
 		    /* directors <== 11/29/24 15:39:32 */ 
-		    else if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("d") && !dbool) {
+		    else if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("d")) {
 			try {
-			    doIt(mutex,*(dbs.at(threadnum)),directors_insert,rowslicer,icast(Principles::TCONST),icast(Principles::NCONST));
+			    doIt(db,directors_insert,rowslicer,{icast(Principles::TCONST),icast(Principles::NCONST)});
 			} catch (SQLite::Exception& e) {
 			    std::cerr << "director error: " << e.what() << '\n';
-			    JTB::Str error {e.what()};
-			    if (error.includes("lock")) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(220*(threadnum+1)));
-				doIt(mutex,*(dbs.at(threadnum)),directors_insert,rowslicer,icast(Principles::TCONST),icast(Principles::NCONST));
-			    }
 			}
 		    }
 		    /* writers <== 11/29/24 15:39:37 */ 
-		    else if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("w") && !wbool) {
+		    else if (rowslicer.at(icast(Principles::CATEGORY)).startsWith("w")) {
 			try {
-			    doIt(mutex,*(dbs.at(threadnum)),writers_insert,rowslicer,icast(Principles::TCONST),icast(Principles::NCONST));
+			    doIt(db,writers_insert,rowslicer,{icast(Principles::TCONST),icast(Principles::NCONST)});
 			} catch (SQLite::Exception& e) {
 			    std::cerr << "writer error: " << e.what() << '\n';
-			    JTB::Str error {e.what()};
-			    if (error.includes("lock")) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(140*(threadnum+1)));
-				doIt(mutex,*(dbs.at(threadnum)),writers_insert,rowslicer,icast(Principles::TCONST),icast(Principles::NCONST));
-			    }
 			}
 		    }
 		} catch (SQLite::Exception& e) {
@@ -556,15 +488,13 @@ int main() {
     std::ifstream lang_stream {};
     std::ifstream basics_stream {}; 
     std::ifstream ratings_stream {}; 
-    JTB::Vec<std::ifstream> principals_streams(THREADLIMIT);
+    std::ifstream principals_stream {};
     std::ifstream name_basics_stream {};
     try { 
 	lang_stream.open( movieDatabasePath.str() + "/lang.tsv" );
 	basics_stream.open( movieDatabasePath.str() + "/title.basics.tsv" ); 
 	ratings_stream.open( movieDatabasePath.str() + "/title.ratings.tsv" ); 
-	principals_streams.forEach([&](std::ifstream& istream) {
-	    istream.open( movieDatabasePath.str() + "/title.principals.tsv" );
-	});
+	principals_stream.open( movieDatabasePath.str() + "/title.principals.tsv" );
 	name_basics_stream.open( movieDatabasePath.str() + "/name.basics.tsv" );
     } catch (std::exception& e) { 
 	std::cerr << "Problem with opening filestreams" << '\n';
@@ -573,59 +503,63 @@ int main() {
     }
 
     try {
-	std::vector<std::unique_ptr<SQLite::Database>> dbs {};
-	for (int i = 0; i < THREADLIMIT; ++i) {
-	    SQLite::Database* db 
-		{new SQLite::Database {movieDatabasePath.str() + "/moviedatabase.db", SQLite::OPEN_READWRITE|SQLite::OPEN_CREATE}};
-	    dbs.emplace_back(db);
-	};	
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Films" (
+	SQLite::Database db {movieDatabasePath.str() + "/moviedatabase.db", SQLite::OPEN_READWRITE|SQLite::OPEN_CREATE};
+	SQLite::Statement wal { db, "pragma journal_mode = WAL" };
+	SQLite::Statement sync { db, "pragma synchronous = 0" };
+	SQLite::Statement cache { db, "pragma cache_size = 1000000" };
+	SQLite::Statement locking { db, "pragma locking_mode = NORMAL" };
+	SQLite::Statement tempstore { db, "pragma temp_store = memory" };
+	SQLite::Statement mmap { db, "pragma mmap_size = 30000000000" };
+	cache.executeStep(); 
+	locking.executeStep();
+	wal.executeStep(); sync.executeStep(); tempstore.executeStep(); mmap.executeStep();
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Films" (
 	    tconst TEXT NOT NULL PRIMARY KEY,
 	    title TEXT NOT NULL,
 	    originalTitle TEXT NOT NULL))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Genres" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Genres" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    genre TEXT NOT NULL))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Runtimes" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Runtimes" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    runtimeInMin INT NOT NULL,
 	    UNIQUE(tconst, runtimeInMin)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Years" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Years" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    year INT NOT NULL,
 	    UNIQUE(tconst, year)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Names" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Names" (
 	    nconst TEXT NOT NULL PRIMARY KEY,
 	    name TEXT NOT NULL,
 	    UNIQUE(nconst, name)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Directors" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Directors" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    nconst TEXT NOT NULL REFERENCES Names(nconst),
 	    UNIQUE(tconst,nconst)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Actors" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Actors" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    nconst TEXT NOT NULL REFERENCES Names(nconst),
 	    UNIQUE(tconst,nconst)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Writers" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Writers" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    nconst TEXT NOT NULL REFERENCES Names(nconst),
 	    UNIQUE(tconst,nconst)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "KnownFor" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "KnownFor" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    nconst TEXT NOT NULL REFERENCES Names(nconst),
 	    UNIQUE(tconst,nconst)))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Ratings" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Ratings" (
 	    tconst TEXT NOT NULL UNIQUE REFERENCES Films(tconst),
 	    rating FLOAT NOT NULL,
 	    numVotes INTEGER NOT NULL))");
-	dbs.at(0)->exec(R"(CREATE TABLE IF NOT EXISTS "Languages" (
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Languages" (
 	    tconst TEXT NOT NULL REFERENCES Films(tconst),
 	    lang TEXT NOT NULL))");
 
-	/* loadBasics(dbs, basics_stream); */
-	/* loadRatings(dbs, ratings_stream); */
-	/* loadLanguage(dbs, lang_stream); */
-	loadPrincipals(dbs, principals_streams, name_basics_stream);
+	loadBasics(db, basics_stream);
+	loadRatings(db, ratings_stream);
+	loadLanguage(db, lang_stream);
+	loadPrincipals(db, principals_stream, name_basics_stream);
     } catch (std::exception& e) {
 	std::cerr << e.what() << '\n';
 	    exit(1);
