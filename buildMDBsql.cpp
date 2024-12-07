@@ -13,91 +13,25 @@
 #include "jtb/jtbstr.h"
 #include "jtb/jtbvec.h"
 #include <SQLiteCpp/SQLiteCpp.h>
+#include "progressbar/include/progressbar.hpp"
+
 
 const int THREADLIMIT = 4;
 const int PRINCIPLES_BATCH_SIZE = 5000000;
+const bool VERBOSE = false;
 
 namespace fs = std::filesystem;
 using st = std::vector<std::string>::size_type;
 
-uint convertToInt(JTB::Str& str) {
-    std::string buf {};
-    int sz = str.size();
-    int i = 2;
-    while (str.at(i) == '0') {++i;};
-    return std::stoi(str.slice(i,sz).stdstr());
-}
 
-struct StreamData {
-    uint linecount {};
-    JTB::Vec<uint> starts {};
-    JTB::Vec<uint> stops {};
-};
-
-StreamData getStreamData(std::ifstream& ifstream, int threadlimit, std::function<int(std::ifstream&,uint)> callback) {
-    if (threadlimit <= 0) {
-	std::cerr << "Called getStreamData with zero threadlimit" << '\n';
-	exit(1);
-    }
-
-    StreamData streamdata {};
-    uint max = 0;
-    JTB::Str buf {};
-
-    buf.absorbLine(ifstream).clear();
-    while (ifstream.good()) { 
-	try {
-	    uint index = callback(ifstream,max);
-	    max = max < index+1 ? index+1 : max;
-	} catch (std::exception& e) {
-	    std::cerr << "Exception while getting max: " << e.what() << '\n';
-	}
-    }
-    streamdata.linecount = max;
-    std::cerr << "max: " << max << '\n';
-
-    ifstream.clear();
-    ifstream.seekg(0, std::ios::beg);
-
-    uint count = 0;
-    buf.absorbLine(ifstream).clear();
-    uint position_seeker {0};
-    while (ifstream.good()) { 
-	if (count % (streamdata.linecount/threadlimit) == 0) {
-	    streamdata.starts.push(ifstream.tellg());
-	    if (count > 0) streamdata.stops.push(static_cast<uint>(ifstream.tellg())-1);
-	} 
-	position_seeker = static_cast<uint>(ifstream.tellg());
-	++count; buf.absorbLine(ifstream).clear();  
-    }
-    streamdata.stops.push(position_seeker);
-    std::cerr << "starts: " << streamdata.starts << '\n';
-    std::cerr << "stops: " << streamdata.stops << '\n';
-
-    ifstream.clear();
-    ifstream.seekg(0,std::ios::beg);
-    return streamdata;
-}
-
-
-struct Film {
-    JTB::Str tconst = "N\\a";
-    JTB::Str title = "N\\a";
-    JTB::Str origtitle = "N\\a";
-    JTB::Str year = "N\\a";
-    JTB::Str length = "N\\a";
-    JTB::Str genre = "N\\a";
-    JTB::Str rating = "0";
-    JTB::Str numrates = "0";
-    JTB::Str lang = "N\\a";
-    JTB::Str directors = "";
-    JTB::Str writers = "";
-    JTB::Str actors = "";
-};
-
-struct Ratepair {
-    std::string rating;
-    std::string numrates;
+class Pbar {
+private: 
+    progressbar pbar;
+public:
+    Pbar(int total): pbar(total) {};
+    void update() { pbar.update(); }
+    void reset() { pbar.reset(); }
+    void set_niter(int n) { pbar.set_niter(n); }
 };
 
 template <typename T>
@@ -138,7 +72,7 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
     /* processing the data */
     while ( filestream.good() && !buf.clear().absorbLine(filestream).isEmpty() ) {
 	JTB::Vec<JTB::Str> rowslicer = buf.split("\t");
-	if (rowslicer[TYPE] == "movie" 
+	if (rowslicer[TYPE].startsWith("mo")
 	    && rowslicer[ISADULT] == "0"
 	    && rowslicer[STARTYEAR] != R"(\N)" 
 	    && rowslicer[RUNTIME] != R"(\N)") {
@@ -149,6 +83,8 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
     JTB::Vec<std::thread> threadPack {};
     int size = (*filebuffer).size();
     int chunksize = (*filebuffer).size()/THREADLIMIT;
+    Pbar pbar(size);
+    std::mutex mutex {};
 
     for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
 	threadPack.push([&,threadnum](){
@@ -159,7 +95,12 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
 	    int start = chunksize*(threadnum);
 	    int stop = chunksize*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
-		std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n';
+
+		{
+		    std::lock_guard<std::mutex> lock { mutex };
+		    pbar.update();
+		}
+		/* std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n'; */
 		try {
 		    film_insert.reset();
 		    film_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
@@ -182,8 +123,10 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
 			    genre_insert.exec();
 		    });
 		} catch (SQLite::Exception& e) {
-		    std::cerr << "Problem reading basics: " << e.what() << '\n';
-		    std::cerr << "Rowslicer: " << (*filebuffer).at(line) << '\n';
+		    if (VERBOSE) {
+			std::cerr << "Problem reading basics: " << e.what() << '\n';
+			std::cerr << "Rowslicer: " << (*filebuffer).at(line) << '\n';
+		    }
 		} catch (std::exception& e) {
 		    std::cerr << "Error reading basics: " << e.what() << '\n';
 		    std::cerr << "Rowslicer: " << (*filebuffer).at(line) << '\n';
@@ -197,7 +140,7 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
 	    thread.join();
 	}
     });
-    std::cerr << "Done reading the basics!" << '\n';
+    std::cerr << "\nDone reading the basics!" << '\n';
 }
 
 void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
@@ -213,6 +156,8 @@ void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
 
     Filebuffer filebuffer { filestream };
     int size = filebuffer.getBuf().size();
+    Pbar pbar(size);
+    std::mutex mutex {};
 
     for (int threadnum = 0; threadnum < THREADLIMIT; ++threadnum) {
 	threadPack.push([&,threadnum](){
@@ -220,6 +165,10 @@ void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
 	    int start = filebuffer.getChunksize()*threadnum;
 	    int stop = filebuffer.getChunksize()*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
+		{
+		    std::lock_guard<std::mutex> lock { mutex };
+		    pbar.update();
+		}
 		try {
 		    insert.reset(); 
 		    insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
@@ -227,7 +176,7 @@ void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
 		    insert.bind(3,std::stoi(filebuffer.getBuf().at(line).at(NUMRATES).c_str()));
 		    insert.exec(); 
 		} catch (SQLite::Exception& e) { 
-		    std::cerr << "Problem inserting ratings: " << e.what() << '\n';
+		    if (VERBOSE) std::cerr << "Problem inserting ratings: " << e.what() << '\n';
 		} catch (std::exception& e) {
 		    std::cerr << "Error: " << e.what() << '\n';
 		    exit(1);
@@ -241,7 +190,7 @@ void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
 	}
     });
 
-    std::cerr << "Done reading ratings!" << '\n';
+    std::cerr << "\nDone reading ratings!" << '\n';
 }
 
 void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
@@ -267,7 +216,7 @@ void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
 		    insert.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
 		    insert.exec(); 
 		} catch (SQLite::Exception& e) { 
-		    std::cerr << "Problem: " << e.what() << '\n';
+		    if (VERBOSE) std::cerr << "Problem: " << e.what() << '\n';
 		} catch (std::exception& e) { 
 		    std::cerr << "Error: " << e.what() << '\n';
 		    exit(1);
@@ -284,23 +233,6 @@ void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
 };
 
 
-void doIt (SQLite::Database& db, SQLite::Statement& statement, JTB::Vec<JTB::Str>& rowslicer, std::initializer_list<int> lst){
-    try {
-	statement.reset();
-	int param = 0;
-	for (const int i : lst) {
-	    statement.bind(++param, rowslicer.at(i).lower().c_str());
-	}
-	statement.exec();
-    } catch (SQLite::Exception& e) {
-	std::cerr << "Problemo: " << e.what() << '\n';
-	return;
-    } catch (std::exception& e) {
-	std::cerr << "Error: " << e.what() << '\n';
-	exit(1);
-    }
-}
-
 void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std::ifstream& names_stream) {
     /* buffers */
     /* throwing out the first line */
@@ -308,8 +240,10 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
     buf.absorbLine(principals_stream).clear();
     enum class Names { NCONST, NAME };
     enum class Principles { TCONST, ORDERING, NCONST, CATEGORY, JOB, CHARACTERS };
+    int runs = 0;
 
     while (names_stream.good()) {
+	if (runs++ > 0) std::cerr << '\n';
 	std::unique_ptr<JTB::Vec<JTB::Vec<JTB::Str>>> filebuffer {new JTB::Vec<JTB::Vec<JTB::Str>>};
 	int linecount = 0;
 
@@ -324,20 +258,28 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 	JTB::Vec<std::thread> threadPack {};
 	int size = (*filebuffer).size();
 	int chunksize = (*filebuffer).size()/THREADLIMIT;
+	Pbar pbar(size);
+	std::mutex mutex {};
+
 	for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
 	    threadPack.push([&,threadnum](){
 		int start = chunksize*(threadnum);
 		int stop = chunksize*(threadnum+1);
 		SQLite::Statement insert { db, "INSERT INTO Names (nconst, name) VALUES (?, ?)" };
-		for (int line = start; line < std::min(stop,size); ++line) {
-		    std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n';
+		int min { std::min(stop,size) } ;
+		for (int line = start; line < min; ++line) {
+		    {
+			std::lock_guard<std::mutex> lock { mutex };
+			pbar.update();
+		    }
+		    /* std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n'; */
 		    try {
 			insert.reset(); 
 			insert.bind(1,filebuffer->at(line).at(icast(Names::NCONST)).c_str());
-			insert.bind(2,filebuffer->at(line).at(icast(Names::NAME)).lower().c_str());
+			insert.bind(2,filebuffer->at(line).at(icast(Names::NAME)).c_str());
 			insert.exec(); 
 		    } catch (SQLite::Exception& e) { 
-			std::cerr << "Problem with Names: " << e.what() << '\n';
+			if (VERBOSE) std::cerr << "Problem with Names: " << e.what() << '\n';
 		    } catch (std::exception& e) {
 			std::cerr << "Error: " << e.what() << '\n';
 			exit(1);
@@ -351,11 +293,14 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 		threadPack.at(i).join();
 	    }
 	};
-
     }
-    std::cerr << "Done reading names!" << '\n';
+
+    std::cerr << "\nDone reading names!" << '\n';
+
+    runs = 0;
 
     while (principals_stream.good()) {
+	if (runs++ > 0) { std::cerr << '\n'; }
 	std::unique_ptr<JTB::Vec<JTB::Vec<JTB::Str>>> filebuffer {new JTB::Vec<JTB::Vec<JTB::Str>>};
 	int linecount = 0;
 
@@ -370,6 +315,8 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 	JTB::Vec<std::thread> threadPack {};
 	int size = (*filebuffer).size();
 	int chunksize = (*filebuffer).size()/THREADLIMIT;
+	Pbar pbar(size);
+	std::mutex mutex {};
 
 	for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
 	    threadPack.push([&,threadnum](){
@@ -378,35 +325,65 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 		SQLite::Statement directors_insert { db, "INSERT INTO Directors (tconst, nconst) VALUES (?, ?)" };
 		SQLite::Statement actors_insert { db, "INSERT INTO Actors (tconst, nconst) VALUES (?, ?)" };
 		SQLite::Statement writers_insert { db, "INSERT INTO Writers (tconst, nconst) VALUES (?, ?)" };
-		for (int line = start; line < std::min(stop,size); ++line) {
-		    std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n';
+		JTB::Str skipbuf {};
+		int min = std::min(stop,size);
+		for (int line = start; line < min; ++line) {
+		    JTB::Str tconst = filebuffer->at(line).at(icast(Principles::TCONST));
+		    {
+			std::lock_guard<std::mutex> lock {mutex};
+			pbar.update();
+		    }
+		    if (tconst == skipbuf) continue;
+		    /* std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n'; */
+		    JTB::Str category = filebuffer->at(line).at(icast(Principles::CATEGORY));
 		    try {
 			/* actors <== 11/29/24 15:39:28 */ 
-			if (filebuffer->at(line).at(icast(Principles::CATEGORY)).startsWith("a")) {
+			if (category.startsWith("a")) {
 			    try {
-				doIt(db,actors_insert,filebuffer->at(line),{icast(Principles::TCONST),icast(Principles::NCONST)});
+				actors_insert.reset();
+				actors_insert.bind(1, tconst.c_str());
+				actors_insert.bind(2, filebuffer->at(line).at(icast(Principles::NCONST)).c_str());
+				actors_insert.exec();
 			    } catch (SQLite::Exception& e) {
-				std::cerr << "actor error: " << e.what() << '\n';
+				if (VERBOSE) std::cerr << "actor excpt: " << e.what() << '\n';
+				skipbuf.clear().push(tconst);
+			    } catch (std::exception& e) {
+				std::cerr << "error: " << e.what() << '\n';
+				exit(1);
 			    }
 			}
 			/* directors <== 11/29/24 15:39:32 */ 
-			else if (filebuffer->at(line).at(icast(Principles::CATEGORY)).startsWith("d")) {
+			else if (category.startsWith("d")) {
 			    try {
-				doIt(db,directors_insert,filebuffer->at(line),{icast(Principles::TCONST),icast(Principles::NCONST)});
+				directors_insert.reset();
+				directors_insert.bind(1, tconst.c_str());
+				directors_insert.bind(2, filebuffer->at(line).at(icast(Principles::NCONST)).c_str());
+				directors_insert.exec();
 			    } catch (SQLite::Exception& e) {
-				std::cerr << "director error: " << e.what() << '\n';
+				if (VERBOSE) std::cerr << "director excpt: " << e.what() << '\n';
+				skipbuf.clear().push(tconst);
+			    } catch (std::exception& e) {
+				std::cerr << "error: " << e.what() << '\n';
+				exit(1);
 			    }
 			}
 			/* writers <== 11/29/24 15:39:37 */ 
-			else if (filebuffer->at(line).at(icast(Principles::CATEGORY)).startsWith("w")) {
+			else if (category.startsWith("w")) {
 			    try {
-				doIt(db,writers_insert,filebuffer->at(line),{icast(Principles::TCONST),icast(Principles::NCONST)});
+				writers_insert.reset();
+				writers_insert.bind(1, tconst.c_str());
+				writers_insert.bind(2, filebuffer->at(line).at(icast(Principles::NCONST)).c_str());
+				writers_insert.exec();
 			    } catch (SQLite::Exception& e) {
-				std::cerr << "writer error: " << e.what() << '\n';
+				if (VERBOSE) std::cerr << "writer excpt: " << e.what() << '\n';
+				skipbuf.clear().push(tconst);
+			    } catch (std::exception& e) {
+				std::cerr << "error: " << e.what() << '\n';
+				exit(1);
 			    }
 			}
 		    } catch (SQLite::Exception& e) {
-			std::cerr << "Problem with principals: " << e.what() << '\n';
+			if (VERBOSE) std::cerr << "Problem with principals: " << e.what() << '\n';
 		    } catch (std::exception& e) {
 			std::cerr << "Error while inserting principals: " << e.what() << '\n';
 		    }
@@ -420,7 +397,7 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 	    }
 	};
     }
-    std::cerr << "Done reading principals!" << '\n';
+    std::cerr << "\nDone reading principals!" << '\n';
 }
 
 int main() {
