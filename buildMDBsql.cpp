@@ -152,77 +152,35 @@ void loadBasics(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstre
 
     for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
 	threadPack.push([&,threadnum](){
-	    SQLite::Statement select1 {*(dbs.at(threadnum)), "SELECT * FROM Films WHERE tconst = ?" };
-	    SQLite::Statement select2 {*(dbs.at(threadnum)), "SELECT * FROM Years WHERE tconst = ?" };
-	    SQLite::Statement select3 {*(dbs.at(threadnum)), "SELECT * FROM Runtimes WHERE tconst = ?" };
-	    SQLite::Statement select4 {*(dbs.at(threadnum)), "SELECT * FROM Genres WHERE tconst = ? AND genre = ?" };
-	    SQLite::Statement film_insert {*(dbs.at(threadnum)), "INSERT INTO Films (tconst, title, originalTitle) VALUES (?, ?, ?)" };
-	    SQLite::Statement year_insert {*(dbs.at(threadnum)), "INSERT INTO Years (tconst, year) VALUES (?, ?)" };
-	    SQLite::Statement runtime_insert {*(dbs.at(threadnum)), "INSERT INTO Runtimes (tconst, runtimeInMin) VALUES (?, ?)" };
-	    SQLite::Statement genre_insert {*(dbs.at(threadnum)), "INSERT INTO Genres (tconst, genre) VALUES (?, ?)" };
+	    SQLite::Statement film_insert {*(dbs.at(0)), "INSERT INTO Films (tconst, title, originalTitle) VALUES (?, ?, ?)" };
+	    SQLite::Statement year_insert {*(dbs.at(0)), "INSERT INTO Years (tconst, year) VALUES (?, ?)" };
+	    SQLite::Statement runtime_insert {*(dbs.at(0)), "INSERT INTO Runtimes (tconst, runtimeInMin) VALUES (?, ?)" };
+	    SQLite::Statement genre_insert {*(dbs.at(0)), "INSERT INTO Genres (tconst, genre) VALUES (?, ?)" };
 	    int start = chunksize*(threadnum);
 	    int stop = chunksize*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
 		std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n';
 		try {
-		    {
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			select1.reset();
-			select1.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			select1.executeStep();
-			select2.reset();
-			select2.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			select2.executeStep();
-			select3.reset();
-			select3.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			select3.executeStep();
-			tr.commit();
-		    }
-		    bool film_inserted = false;
-		    if (!select1.hasRow()) {
-			std::lock_guard<std::mutex> lock {mutex};
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			film_insert.reset();
-			film_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			film_insert.bind(2, (*filebuffer).at(line).at(PRIMARY).c_str());
-			film_insert.bind(3, (*filebuffer).at(line).at(ORIGINAL).c_str());
-			film_insert.exec();
-			film_inserted = true;
-			tr.commit();
-		    }
-		    if ((select1.hasRow() || film_inserted) && !select2.hasRow()) {
-			std::lock_guard<std::mutex> lock {mutex};
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			year_insert.reset();
-			year_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			year_insert.bind(2, (*filebuffer).at(line).at(STARTYEAR).c_str());
-			year_insert.exec();
-			tr.commit();
-		    }
-		    if ((select1.hasRow() || film_inserted) && !select3.hasRow()) {
-			std::lock_guard<std::mutex> lock {mutex};
-			SQLite::Transaction tr {*(dbs.at(threadnum))};
-			runtime_insert.reset();
-			runtime_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			runtime_insert.bind(2, std::stoi((*filebuffer).at(line).at(RUNTIME).c_str()));
-			runtime_insert.exec();
-			tr.commit();
-		    }
+		    film_insert.reset();
+		    film_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
+		    film_insert.bind(2, (*filebuffer).at(line).at(PRIMARY).c_str());
+		    film_insert.bind(3, (*filebuffer).at(line).at(ORIGINAL).c_str());
+		    year_insert.reset();
+		    year_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
+		    year_insert.bind(2, (*filebuffer).at(line).at(STARTYEAR).c_str());
+		    runtime_insert.reset();
+		    runtime_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
+		    runtime_insert.bind(2, std::stoi((*filebuffer).at(line).at(RUNTIME).c_str()));
+
+		    film_insert.exec();
+		    year_insert.exec();
+		    runtime_insert.exec();
 		    JTB::Vec<JTB::Str> genres = (*filebuffer).at(line).at(GENRES).split(",");
 		    genres.forEach([&](JTB::Str genre) {
-			select4.reset();
-			select4.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
-			select4.bind(2, genre.c_str());
-			select4.executeStep();
-			if ((select1.hasRow() || film_inserted) && !select4.hasRow()) {
-			    std::lock_guard<std::mutex> lock {mutex};
-			    SQLite::Transaction tr {*(dbs.at(threadnum))};
 			    genre_insert.reset();
 			    genre_insert.bind(1, (*filebuffer).at(line).at(TCONST).c_str());
 			    genre_insert.bind(2, genre.c_str());
 			    genre_insert.exec();
-			    tr.commit();
-			} 
 		    });
 		} catch (SQLite::Exception& e) {
 		    std::cerr << "Problem reading basics: " << e.what() << '\n';
@@ -232,7 +190,6 @@ void loadBasics(std::vector<std::unique_ptr<SQLite::Database>>& dbs, std::ifstre
 		    std::cerr << "Rowslicer: " << (*filebuffer).at(line) << '\n';
 		    exit(1);
 		}
-		
 	    }
 	});
     }
