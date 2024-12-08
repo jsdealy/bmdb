@@ -19,6 +19,7 @@
 const int THREADLIMIT = 4;
 const int PRINCIPLES_BATCH_SIZE = 5000000;
 const bool VERBOSE = false;
+const int LOGGING_FACTOR = 4000;
 
 namespace fs = std::filesystem;
 using st = std::vector<std::string>::size_type;
@@ -75,6 +76,7 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
 	if (rowslicer[TYPE].startsWith("mo")
 	    && rowslicer[ISADULT] == "0"
 	    && rowslicer[STARTYEAR] != R"(\N)" 
+	    && rowslicer[GENRES] != R"(\N)" 
 	    && rowslicer[RUNTIME] != R"(\N)") {
 	    (*filebuffer).push(rowslicer);
 	}
@@ -83,7 +85,7 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
     JTB::Vec<std::thread> threadPack {};
     int size = (*filebuffer).size();
     int chunksize = (*filebuffer).size()/THREADLIMIT;
-    Pbar pbar(size);
+    Pbar pbar(size/LOGGING_FACTOR);
     std::mutex mutex {};
 
     for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
@@ -96,10 +98,11 @@ void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
 	    int stop = chunksize*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
 
-		{
+		if (line%LOGGING_FACTOR == 0) {
 		    std::lock_guard<std::mutex> lock { mutex };
 		    pbar.update();
 		}
+
 		/* std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n'; */
 		try {
 		    film_insert.reset();
@@ -156,7 +159,7 @@ void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
 
     Filebuffer filebuffer { filestream };
     int size = filebuffer.getBuf().size();
-    Pbar pbar(size);
+    Pbar pbar(size/LOGGING_FACTOR);
     std::mutex mutex {};
 
     for (int threadnum = 0; threadnum < THREADLIMIT; ++threadnum) {
@@ -165,7 +168,7 @@ void loadRatings(SQLite::Database& db, std::ifstream& filestream) {
 	    int start = filebuffer.getChunksize()*threadnum;
 	    int stop = filebuffer.getChunksize()*(threadnum+1);
 	    for (int line = start; line < std::min(stop,size); ++line) {
-		{
+		if (line%LOGGING_FACTOR == 0) {
 		    std::lock_guard<std::mutex> lock { mutex };
 		    pbar.update();
 		}
@@ -232,6 +235,23 @@ void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
     std::cerr << "Done reading languages!" << '\n';
 };
 
+int countlines(std::ifstream& s) {
+    char c {};
+    int count {1};
+    try {
+	while (s.get(c)) {
+	    if (c == '\n') {
+		++count;
+	    }
+	}
+	s.clear();
+	s.seekg(0);
+	return count;
+    } catch (std::exception& e) {
+	std::cerr << "error: " << e.what() << '\n';
+	exit(1);
+    }
+}
 
 void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std::ifstream& names_stream) {
     /* buffers */
@@ -240,10 +260,10 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
     buf.absorbLine(principals_stream).clear();
     enum class Names { NCONST, NAME };
     enum class Principles { TCONST, ORDERING, NCONST, CATEGORY, JOB, CHARACTERS };
-    int runs = 0;
+
+    Pbar names_pbar(countlines(names_stream)/LOGGING_FACTOR);
 
     while (names_stream.good()) {
-	if (runs++ > 0) std::cerr << '\n';
 	std::unique_ptr<JTB::Vec<JTB::Vec<JTB::Str>>> filebuffer {new JTB::Vec<JTB::Vec<JTB::Str>>};
 	int linecount = 0;
 
@@ -258,7 +278,6 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 	JTB::Vec<std::thread> threadPack {};
 	int size = (*filebuffer).size();
 	int chunksize = (*filebuffer).size()/THREADLIMIT;
-	Pbar pbar(size);
 	std::mutex mutex {};
 
 	for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
@@ -268,9 +287,9 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 		SQLite::Statement insert { db, "INSERT INTO Names (nconst, name) VALUES (?, ?)" };
 		int min { std::min(stop,size) } ;
 		for (int line = start; line < min; ++line) {
-		    {
+		    if (line%LOGGING_FACTOR == 0) {
 			std::lock_guard<std::mutex> lock { mutex };
-			pbar.update();
+			names_pbar.update();
 		    }
 		    /* std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n'; */
 		    try {
@@ -297,10 +316,9 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 
     std::cerr << "\nDone reading names!" << '\n';
 
-    runs = 0;
+    Pbar prin_pbar(countlines(principals_stream)/LOGGING_FACTOR);
 
     while (principals_stream.good()) {
-	if (runs++ > 0) { std::cerr << '\n'; }
 	std::unique_ptr<JTB::Vec<JTB::Vec<JTB::Str>>> filebuffer {new JTB::Vec<JTB::Vec<JTB::Str>>};
 	int linecount = 0;
 
@@ -315,7 +333,6 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 	JTB::Vec<std::thread> threadPack {};
 	int size = (*filebuffer).size();
 	int chunksize = (*filebuffer).size()/THREADLIMIT;
-	Pbar pbar(size);
 	std::mutex mutex {};
 
 	for (int threadnum=0; threadnum < THREADLIMIT; ++threadnum) {
@@ -329,9 +346,9 @@ void loadPrincipals(SQLite::Database& db, std::ifstream& principals_stream, std:
 		int min = std::min(stop,size);
 		for (int line = start; line < min; ++line) {
 		    JTB::Str tconst = filebuffer->at(line).at(icast(Principles::TCONST));
-		    {
+		    if (line%LOGGING_FACTOR == 0) {
 			std::lock_guard<std::mutex> lock {mutex};
-			pbar.update();
+			prin_pbar.update();
 		    }
 		    if (tconst == skipbuf) continue;
 		    /* std::cerr << threadnum << " : " << (float(line-start)/chunksize)*100 << '\n'; */
