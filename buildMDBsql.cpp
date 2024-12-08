@@ -1,5 +1,6 @@
 #include <SQLiteCpp/Database.h>
 #include <cmath>
+#include <regex>
 #include <algorithm>
 #include <string>
 #include <vector>
@@ -58,6 +59,7 @@ public:
     ~Filebuffer() { delete buffer; };
     auto& getBuf() { return *buffer; }
     int getChunksize() { return chunksize; }
+    int getSize() { return buffer->size(); }
 };
 
 void loadBasics(SQLite::Database& db, std::ifstream& filestream) {
@@ -214,6 +216,50 @@ void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
 	    for (int line = start; line < std::min(stop,size); ++line) {
 		if (filebuffer.getBuf().at(line).size() < 2) continue; 
 		try { 
+		    insert.reset(); 
+		    insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
+		    insert.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
+		    insert.exec(); 
+		} catch (SQLite::Exception& e) { 
+		    if (VERBOSE) std::cerr << "Problem: " << e.what() << '\n';
+		} catch (std::exception& e) { 
+		    std::cerr << "Error: " << e.what() << '\n';
+		    exit(1);
+		}
+	    }
+	});
+	threadPack.forEach([&](std::thread& thread) {
+	    if (thread.joinable()) {
+		thread.join();
+	    }
+	});
+    }
+    std::cerr << "Done reading languages!" << '\n';
+};
+
+void loadCannes(SQLite::Database& db, std::ifstream& cannesfilestream) {
+    /* buffers */
+
+    enum Cols { TITLE,DIRECTOR,COUNTRIES,LANGUAGE,GENDER,INTERNATIONALCOPRODUCTION,VARIOUSLANGUAGES,NOTE };
+
+    Filebuffer filebuffer { cannesfilestream };
+    JTB::Vec<std::thread> threadPack {};
+    std::mutex mutex {};
+    int size = filebuffer.getSize();
+    std::regex re { R"([^[:alnum:]])" };
+
+    for (int threadnum = 0; threadnum < THREADLIMIT; ++threadnum) {
+	int start = filebuffer.getChunksize()*threadnum;
+	int stop = filebuffer.getChunksize()*(threadnum+1);
+	threadPack.push([&,start,stop](){
+	    SQLite::Statement select { db, "SELECT tconst FROM Films WHERE title LIKE ? OR originalTitle LIKE ?" };
+	    SQLite::Statement insert { db, "INSERT INTO Languages (tconst, lang) VALUES (?, ?)" };
+	    for (int line = start; line < std::min(stop,size); ++line) {
+		if (filebuffer.getBuf().at(line).size() < 1) continue; 
+		try { 
+		    select.reset();
+		    select.bind(1, JTB::Str(std::regex_replace(filebuffer.getBuf().at(line).at(TITLE).c_str(),re,R"(%)")).wrap(R"(%)").c_str());
+		    select.executeStep();
 		    insert.reset(); 
 		    insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
 		    insert.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
@@ -443,12 +489,14 @@ int main() {
     }
 
     std::ifstream lang_stream {};
+    std::ifstream cannes_stream {};
     std::ifstream basics_stream {}; 
     std::ifstream ratings_stream {}; 
     std::ifstream principals_stream {};
     std::ifstream name_basics_stream {};
     try { 
 	lang_stream.open( movieDatabasePath.str() + "/lang.tsv" );
+	cannes_stream.open( movieDatabasePath.str() + "/cannes.tsv" );
 	basics_stream.open( movieDatabasePath.str() + "/title.basics.tsv" ); 
 	ratings_stream.open( movieDatabasePath.str() + "/title.ratings.tsv" ); 
 	principals_stream.open( movieDatabasePath.str() + "/title.principals.tsv" );
@@ -514,6 +562,9 @@ int main() {
 	    FOREIGN KEY (tconst) REFERENCES Films (tconst),
 	    FOREIGN KEY (nconst) REFERENCES Names (nconst),
 	    UNIQUE(tconst,nconst)))");
+	db.exec(R"(CREATE TABLE IF NOT EXISTS "Cannes" (
+	    tconst TEXT NOT NULL UNIQUE, 
+	    FOREIGN KEY (tconst) REFERENCES Films (tconst))");
 	/* db.exec(R"(CREATE TABLE IF NOT EXISTS "KnownFor" ( */
 	/*     tconst TEXT NOT NULL, */ 
 	/*     nconst TEXT NOT NULL, */ 
@@ -533,6 +584,7 @@ int main() {
 	loadBasics(db, basics_stream);
 	loadRatings(db, ratings_stream);
 	loadLanguage(db, lang_stream);
+	/* loadCannes(db, cannes_stream); */
 	loadPrincipals(db, principals_stream, name_basics_stream);
     } catch (std::exception& e) {
 	std::cerr << e.what() << '\n';
