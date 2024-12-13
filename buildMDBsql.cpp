@@ -237,33 +237,132 @@ void loadLanguage(SQLite::Database& db, std::ifstream& langfilstream) {
     std::cerr << "Done reading languages!" << '\n';
 };
 
+
+
+void tryToFindCannesFilm(const JTB::Str& stringToGrep,
+	      const std::regex& titleStringGrep,
+	      const std::regex& thingToPercent,
+	      const JTB::Str& director_string,
+	      SQLite::Statement& select,
+	      bool& found,
+	      JTB::Str& tconst){
+
+    for (std::sregex_iterator regiter{stringToGrep.stdstr().begin(),stringToGrep.stdstr().end(),titleStringGrep}; 
+    regiter!=std::sregex_iterator{}; ++regiter) {
+
+	JTB::Str unwrapped_tstring { std::regex_replace((*regiter)[1].str().c_str(),thingToPercent,R"(%)") };
+
+	int count {1};
+	std::function<JTB::Str (const char)> callback { [&](const char c) {
+	    JTB::Str ret {c};
+	    if (++count%2 == 0) {
+		ret.push(R"(%)");
+	    }
+	    return ret;
+	} };
+
+	select.reset();
+	select.bind(1, unwrapped_tstring.map(callback).wrap(R"(%)").c_str());
+	select.bind(2, unwrapped_tstring.map(callback).wrap(R"(%)").c_str());
+	select.bind(3, director_string.wrap(R"(%)").c_str());
+	select.executeStep();
+	if (select.hasRow()) { 
+	    found = true; 
+	    tconst = select.getColumn(0).getString();
+	    break; 
+	}
+    }
+}
+
+void reallyTryToFindCannesFilm(const JTB::Str& titleString,
+			       const JTB::Str& director_string,
+			       const SQLite::Database& db,
+			       bool& found,
+			       JTB::Str& tconst){
+    SQLite::Statement selectAllByDir { db, "SELECT Films.title,Films.tconst FROM Films,Directors,Names WHERE Films.tconst = Directors.tconst \
+	AND Directors.nconst = Names.nconst AND name LIKE ?" };
+    selectAllByDir.reset();
+    selectAllByDir.bind(1, director_string.wrap(R"(%)").c_str());
+    struct { float match_percent {0}; JTB::Str best_tconst {}; } best_match {};
+    while (selectAllByDir.executeStep()) {
+	JTB::Str title_to_check {selectAllByDir.getColumn(0).getString()};
+	float sim_score {JTB::string_similarity(titleString,title_to_check)};
+	if (sim_score > 0 && sim_score > best_match.match_percent) {
+	    found = true;
+	    best_match.match_percent = sim_score;
+	    best_match.best_tconst = selectAllByDir.getColumn(1).getString();
+	}
+    }
+}
+
 void loadCannes(SQLite::Database& db, std::ifstream& cannesfilestream) {
+    enum Cols { TITLE,DIRECTOR,COUNTRIES,LANGUAGES,GENDER,INTERNATIONALCOPRODUCTION,USESVARIOUSLANGUAGES,NOTE };
+
     /* buffers */
-
-    enum Cols { TITLE,DIRECTOR,COUNTRIES,LANGUAGE,GENDER,INTERNATIONALCOPRODUCTION,VARIOUSLANGUAGES,NOTE };
-
     Filebuffer filebuffer { cannesfilestream };
     JTB::Vec<std::thread> threadPack {};
     std::mutex mutex {};
     int size = filebuffer.getSize();
-    std::regex re { R"([^[:alnum:]])" };
+    std::regex weakTitleReg { R"(\(?([^\(\)]+)\)?)" };
+    std::regex strongTitleReg { R"(\(?([A-Za-z0-9\s]{4,12})\)?)" };
+    std::regex thingToReplace { R"([^A-Za-z0-9]+)" };
+    std::regex cutFront { R"((^[^\s]+)|([^A-Za-z0-9]+))" };
+    std::regex cutBack { R"((\s[^\s]+$)|([^A-Za-z0-9]+))" };
+
+    Pbar pbar(size/5);
 
     for (int threadnum = 0; threadnum < THREADLIMIT; ++threadnum) {
 	int start = filebuffer.getChunksize()*threadnum;
 	int stop = filebuffer.getChunksize()*(threadnum+1);
 	threadPack.push([&,start,stop](){
-	    SQLite::Statement select { db, "SELECT tconst FROM Films WHERE title LIKE ? OR originalTitle LIKE ?" };
-	    SQLite::Statement insert { db, "INSERT INTO Languages (tconst, lang) VALUES (?, ?)" };
+	    SQLite::Statement select { db, "SELECT Films.tconst FROM Films,Directors,Names WHERE Films.tconst = Directors.tconst \
+		AND Directors.nconst = Names.nconst AND (title LIKE ? OR originalTitle LIKE ?) AND name LIKE ?" };
+	    SQLite::Statement insert { db, "INSERT INTO Cannes (tconst) VALUES (?)" };
 	    for (int line = start; line < std::min(stop,size); ++line) {
-		if (filebuffer.getBuf().at(line).size() < 1) continue; 
+		if (line%5 == 0) {
+		    std::lock_guard<std::mutex> lock {mutex};
+		    pbar.update();
+		}
+		const auto& rowslicer { filebuffer.getBuf().at(line) };
+		if (rowslicer.size() < 7) continue; 
 		try { 
-		    select.reset();
-		    select.bind(1, JTB::Str(std::regex_replace(filebuffer.getBuf().at(line).at(TITLE).c_str(),re,R"(%)")).wrap(R"(%)").c_str());
-		    select.executeStep();
-		    insert.reset(); 
-		    insert.bind(1,filebuffer.getBuf().at(line).at(TCONST).c_str());
-		    insert.bind(2,filebuffer.getBuf().at(line).at(LANG).c_str());
-		    insert.exec(); 
+		    const JTB::Str& titleStringToGrep { rowslicer.at(TITLE) };
+		    /* JTB::Str director_string { std::regex_replace(rowslicer.at(DIRECTOR).c_str(),thingToReplace,R"(%)") };; */
+		    JTB::Str director_string { std::regex_replace(rowslicer.at(DIRECTOR).c_str(),cutFront,R"(%)") };;
+		    /* JTB::Vec<JTB::Str> languages { rowslicer.at(LANGUAGES).split(",") };; */
+		    int dir_count {0};
+		    director_string = director_string.map([&](const char c) {
+			if (++dir_count%2 == 0) return JTB::Str(R"(%)");
+			else return JTB::Str(c);
+		    });
+
+		    bool found = false;
+		    JTB::Str tconst {};
+
+		    tryToFindCannesFilm(titleStringToGrep,weakTitleReg,thingToReplace,director_string,select,found,tconst);
+
+		    if (found) {
+			insert.reset(); 
+			insert.bind(1,tconst.c_str());
+			insert.exec(); 
+		    }
+		    else {
+			tryToFindCannesFilm(titleStringToGrep,strongTitleReg,thingToReplace,director_string,select,found,tconst);
+			if (found) {
+			    insert.reset(); 
+			    insert.bind(1,tconst.c_str());
+			    insert.exec(); 
+			}
+			else {
+			    reallyTryToFindCannesFilm(titleStringToGrep,director_string,db,found,tconst);
+			    if (found) {
+				insert.reset(); 
+				insert.bind(1,tconst.c_str());
+				insert.exec(); 
+			    }
+			}
+		    }
+
 		} catch (SQLite::Exception& e) { 
 		    if (VERBOSE) std::cerr << "Problem: " << e.what() << '\n';
 		} catch (std::exception& e) { 
@@ -272,13 +371,13 @@ void loadCannes(SQLite::Database& db, std::ifstream& cannesfilestream) {
 		}
 	    }
 	});
-	threadPack.forEach([&](std::thread& thread) {
-	    if (thread.joinable()) {
-		thread.join();
-	    }
-	});
     }
-    std::cerr << "Done reading languages!" << '\n';
+    threadPack.forEach([&](std::thread& thread) {
+	if (thread.joinable()) {
+	    thread.join();
+	}
+    });
+    std::cerr << "\nDone with Cannes!" << '\n';
 };
 
 int countlines(std::ifstream& s) {
@@ -564,7 +663,7 @@ int main() {
 	    UNIQUE(tconst,nconst)))");
 	db.exec(R"(CREATE TABLE IF NOT EXISTS "Cannes" (
 	    tconst TEXT NOT NULL UNIQUE, 
-	    FOREIGN KEY (tconst) REFERENCES Films (tconst))");
+	    FOREIGN KEY (tconst) REFERENCES Films (tconst)))");
 	/* db.exec(R"(CREATE TABLE IF NOT EXISTS "KnownFor" ( */
 	/*     tconst TEXT NOT NULL, */ 
 	/*     nconst TEXT NOT NULL, */ 
@@ -581,13 +680,13 @@ int main() {
 	    lang TEXT NOT NULL,
 	    FOREIGN KEY (tconst) REFERENCES Films (tconst)))");
 
-	loadBasics(db, basics_stream);
-	loadRatings(db, ratings_stream);
-	loadLanguage(db, lang_stream);
-	/* loadCannes(db, cannes_stream); */
-	loadPrincipals(db, principals_stream, name_basics_stream);
+	/* loadBasics(db, basics_stream); */
+	/* loadRatings(db, ratings_stream); */
+	/* loadLanguage(db, lang_stream); */
+	/* loadPrincipals(db, principals_stream, name_basics_stream); */
+	loadCannes(db, cannes_stream);
     } catch (std::exception& e) {
-	std::cerr << e.what() << '\n';
+	std::cerr << "error at the start: " << e.what() << '\n';
 	exit(1);
     }
 
